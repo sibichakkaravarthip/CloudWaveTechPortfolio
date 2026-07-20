@@ -44,7 +44,7 @@ export default function Contact() {
     setErrorMessage('');
 
     try {
-      const response = await fetch('https://cloudwavetechportfolio.onrender.com/send', {
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/send`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
