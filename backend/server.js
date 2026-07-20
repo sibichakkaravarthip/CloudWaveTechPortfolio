@@ -123,16 +123,30 @@ app.post('/send', validateContactPayload, async (req, res, next) => {
     });
   }
 
-  // Create transporter with Gmail SMTP
+  // Create transporter with Gmail SMTP + connection timeouts
   const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true, // true for port 465
+    service: 'gmail',
     auth: {
       user: emailUser,
       pass: emailPass
-    }
+    },
+    connectionTimeout: 30000,  // 30s to establish TCP connection
+    greetingTimeout: 30000,    // 30s to receive SMTP greeting
+    socketTimeout: 30000       // 30s of inactivity before socket closes
   });
+
+  // Verify SMTP connection before sending
+  try {
+    await transporter.verify();
+    console.log('[Email] SMTP verified successfully.');
+  } catch (verifyError) {
+    console.error('[Email] SMTP verification failed:', verifyError.message);
+    return res.status(500).json({
+      success: false,
+      error: 'SMTP Verification Failed',
+      message: 'Unable to connect to the email server. Please try again later.'
+    });
+  }
 
   // Construct Email Contents
   const mailSubject = `CloudWaveTech Lead: ${subject ? subject.trim() : 'New Contact Inquiry'}`;
