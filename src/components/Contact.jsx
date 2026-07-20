@@ -44,7 +44,7 @@ export default function Contact() {
     setErrorMessage('');
 
     try {
-      const response = await fetch('http://localhost:5000/send', {
+      const response = await fetch('https://cloudwavetechportfolio.onrender.com/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
