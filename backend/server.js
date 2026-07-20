@@ -1,13 +1,13 @@
 /**
  * CloudWaveTech Portfolio Contact Form API Server
- * 
+ *
  * Tech Stack: Node.js, Express, Nodemailer, cors, dotenv
  * Features:
  *  - CORS and JSON middleware
  *  - POST /send endpoint to receive name, email, subject, message
  *  - Empty field validation
  *  - Nodemailer transporter using Gmail SMTP
- *  - Responsive HTML + plain-text fallback templates
+ *  - HTML owner notification + client auto-reply emails
  *  - Robust crash prevention and error handling
  */
 
@@ -15,67 +15,50 @@ const express = require('express');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const path = require('path');
-const mysql = require('mysql2/promise');
+const https = require('https');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 
-let dbPool = null;
-
-async function initDatabase() {
-  const host = process.env.DB_HOST || 'localhost';
-  const port = parseInt(process.env.DB_PORT || '3306', 10);
-  const user = process.env.DB_USER || 'root';
-  const password = process.env.DB_PASSWORD || '';
-  const database = process.env.DB_NAME || 'cloudwavetech';
-
-  console.log(`[Database] Attempting connection to MySQL server at ${host}:${port}...`);
+// ── Google Sheets Helper ─────────────────────────────────────────────────────
+// Sends client data to Google Sheets via Apps Script Web App (uses fetch API).
+async function saveToGoogleSheet(data) {
+  const webhookUrl = process.env.GOOGLE_SHEET_WEBHOOK;
+  if (!webhookUrl) {
+    console.warn('[Sheets] GOOGLE_SHEET_WEBHOOK not set in .env — skipping.');
+    return;
+  }
 
   try {
-    // 1. Establish connection to MySQL without specifying a database to ensure it exists
-    const tempConnection = await mysql.createConnection({
-      host,
-      port,
-      user,
-      password
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      redirect: 'follow'   // automatically follows Google's 302 redirect
     });
 
-    console.log('[Database] Connected to MySQL server. Ensuring database exists...');
-    await tempConnection.query(`CREATE DATABASE IF NOT EXISTS \`${database}\`;`);
-    await tempConnection.end();
+    const text = await response.text();
 
-    // 2. Create persistent connection pool targeting our database
-    dbPool = mysql.createPool({
-      host,
-      port,
-      user,
-      password,
-      database,
-      waitForConnections: true,
-      connectionLimit: 10,
-      queueLimit: 0
-    });
-
-    console.log(`[Database] Connection pool created for database: ${database}`);
-
-    // 3. Create the contact_submissions table if it does not exist
-    const createTableQuery = `
-      CREATE TABLE IF NOT EXISTS contact_submissions (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        email VARCHAR(255) NOT NULL,
-        subject VARCHAR(255),
-        message TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    `;
-    await dbPool.query(createTableQuery);
-    console.log('[Database] contact_submissions table checked/created successfully.');
-  } catch (error) {
-    console.error('[Database] CRITICAL: Initialization failed:', error.message);
-    throw error;
+    try {
+      const json = JSON.parse(text);
+      if (json.success) {
+        console.log('[Sheets] ✅ Row appended to Google Sheet successfully.');
+      } else {
+        console.error('[Sheets] ❌ Apps Script error:', json.error);
+      }
+    } catch {
+      // Response was HTML — log readable error
+      const plain = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      console.error('[Sheets] ❌ Google error (HTML):', plain.substring(0, 400));
+    }
+  } catch (err) {
+    console.error('[Sheets] ❌ Network error:', err.message);
   }
 }
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+
 
 // 1. Configure Middlewares
 app.use(cors());
@@ -127,28 +110,6 @@ app.post('/send', validateContactPayload, async (req, res, next) => {
   const { name, email, subject, message } = req.body;
   const submissionTime = new Date().toLocaleString('en-US', { timeZoneName: 'short' });
 
-  // Save submission to MySQL database
-  try {
-    const insertQuery = `
-      INSERT INTO contact_submissions (name, email, subject, message)
-      VALUES (?, ?, ?, ?);
-    `;
-    await dbPool.query(insertQuery, [
-      name.trim(),
-      email.trim(),
-      subject ? subject.trim() : null,
-      message.trim()
-    ]);
-    console.log('[Database] Contact submission successfully persisted in MySQL.');
-  } catch (dbError) {
-    console.error('[Database] Failed to persist contact submission in MySQL:', dbError);
-    return res.status(500).json({
-      success: false,
-      error: 'Database Persistence Failure',
-      message: 'Failed to record your submission in the database. Please try again later.'
-    });
-  }
-
   // Extract env variables
   const emailUser = process.env.EMAIL_USER;
   const emailPass = process.env.EMAIL_PASS;
@@ -166,7 +127,7 @@ app.post('/send', validateContactPayload, async (req, res, next) => {
   const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
     port: 465,
-    secure: true, // true for 465, false for other ports
+    secure: true, // true for port 465
     auth: {
       user: emailUser,
       pass: emailPass
@@ -175,8 +136,8 @@ app.post('/send', validateContactPayload, async (req, res, next) => {
 
   // Construct Email Contents
   const mailSubject = `CloudWaveTech Lead: ${subject ? subject.trim() : 'New Contact Inquiry'}`;
-  
-  // HTML Template for beautiful styling in Gmail inbox
+
+  // HTML Template for owner inbox
   const htmlBody = `
     <!DOCTYPE html>
     <html>
@@ -296,7 +257,7 @@ app.post('/send', validateContactPayload, async (req, res, next) => {
     </html>
   `;
 
-  // Fallback plain text representation for non-HTML mail clients
+  // Fallback plain text for non-HTML clients
   const textBody = `
 CloudWaveTech Contact Form Submission
 =====================================
@@ -315,20 +276,208 @@ ${message.trim()}
 Sent securely via CloudWaveTech Contact Form API.
   `.trim();
 
-  // Transporter options
+  // Owner notification mail options
   const mailOptions = {
-    from: `"${name.trim()}" <${emailUser}>`, // Must send FROM the authenticated email
-    replyTo: email.trim(), // Replying to the mail will reply directly to the client's email
-    to: emailUser, // Deliver to owner's inbox
+    from: `"CloudWaveTech Contact Form" <${emailUser}>`,
+    replyTo: email.trim(),
+    to: emailUser,
     subject: mailSubject,
     text: textBody,
     html: htmlBody
   };
 
+  // Auto-reply HTML email for the client
+  const clientReplyHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Thank You – CloudWaveTech</title>
+      <style>
+        body {
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          background-color: #f4f6f9;
+          margin: 0;
+          padding: 20px;
+          color: #2e384d;
+        }
+        .card {
+          max-width: 600px;
+          background: #ffffff;
+          border-radius: 12px;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+          border: 1px solid #e1e4e8;
+          margin: 20px auto;
+          overflow: hidden;
+        }
+        .header {
+          background: linear-gradient(135deg, #1e40af, #0891b2);
+          color: #ffffff;
+          padding: 32px 24px;
+          text-align: center;
+        }
+        .header h2 {
+          margin: 0 0 6px 0;
+          font-size: 24px;
+          font-weight: 700;
+          letter-spacing: 0.5px;
+        }
+        .header p {
+          margin: 0;
+          font-size: 14px;
+          opacity: 0.85;
+        }
+        .content {
+          padding: 32px 30px;
+        }
+        .greeting {
+          font-size: 17px;
+          font-weight: 600;
+          color: #1f2937;
+          margin-bottom: 12px;
+        }
+        .body-text {
+          font-size: 15px;
+          color: #4b5563;
+          line-height: 1.7;
+          margin-bottom: 20px;
+        }
+        .summary-box {
+          background-color: #f0f4ff;
+          border-radius: 8px;
+          padding: 18px 20px;
+          border-left: 4px solid #3b82f6;
+          margin-bottom: 24px;
+        }
+        .summary-box .row {
+          display: flex;
+          margin-bottom: 8px;
+          font-size: 14px;
+          color: #374151;
+        }
+        .summary-box .row:last-child {
+          margin-bottom: 0;
+        }
+        .summary-box .lbl {
+          font-weight: 700;
+          width: 80px;
+          flex-shrink: 0;
+          color: #1e40af;
+        }
+        .cta {
+          text-align: center;
+          margin: 20px 0;
+        }
+        .cta a {
+          display: inline-block;
+          background: linear-gradient(135deg, #1e40af, #0891b2);
+          color: #ffffff;
+          text-decoration: none;
+          padding: 12px 28px;
+          border-radius: 8px;
+          font-size: 14px;
+          font-weight: 600;
+          letter-spacing: 0.3px;
+        }
+        .footer {
+          background-color: #f9fafb;
+          padding: 16px;
+          text-align: center;
+          font-size: 12px;
+          color: #9ca3af;
+          border-top: 1px solid #f0f2f5;
+        }
+        .footer a {
+          color: #3b82f6;
+          text-decoration: none;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="header">
+          <h2>☁️ CloudWaveTech</h2>
+          <p>We've received your message!</p>
+        </div>
+        <div class="content">
+          <div class="greeting">Hi ${name.trim()},</div>
+          <p class="body-text">
+            Thank you for reaching out to <strong>CloudWaveTech</strong>! We have successfully received your inquiry and our team will review it shortly.
+          </p>
+          <p class="body-text">
+            We typically respond within <strong>24–48 business hours</strong>. In the meantime, feel free to explore our services or portfolio.
+          </p>
+
+          <div class="summary-box">
+            <div class="row"><span class="lbl">Subject:</span><span>${subject ? subject.trim() : 'General Inquiry'}</span></div>
+            <div class="row"><span class="lbl">Sent on:</span><span>${submissionTime}</span></div>
+          </div>
+
+          <div class="cta">
+            <a href="https://cloudwavetech.com" target="_blank">Visit Our Website</a>
+          </div>
+
+          <p class="body-text" style="font-size:14px; color:#6b7280;">
+            If you have any urgent questions, feel free to reply directly to this email and we'll get back to you as soon as possible.
+          </p>
+
+          <p class="body-text" style="margin-bottom:0;">
+            Warm regards,<br>
+            <strong>CloudWaveTech Team</strong>
+          </p>
+        </div>
+        <div class="footer">
+          &copy; ${new Date().getFullYear()} CloudWaveTech. All rights reserved.<br>
+          <a href="mailto:cloudwavetech33@gmail.com">cloudwavetech33@gmail.com</a>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  // Auto-reply plain text fallback
+  const clientReplyText = `
+Hi ${name.trim()},
+
+Thank you for contacting CloudWaveTech! We have received your inquiry and will get back to you within 24–48 business hours.
+
+Your submission summary:
+  Subject:   ${subject ? subject.trim() : 'General Inquiry'}
+  Sent on:   ${submissionTime}
+
+If you have any urgent questions, simply reply to this email.
+
+Warm regards,
+CloudWaveTech Team
+cloudwavetech33@gmail.com
+  `.trim();
+
+  // Auto-reply mail options — sent to the client
+  const clientReplyOptions = {
+    from: `"CloudWaveTech" <${emailUser}>`,
+    to: email.trim(),
+    subject: `We received your message – CloudWaveTech`,
+    text: clientReplyText,
+    html: clientReplyHtml
+  };
+
   try {
-    // Send email using transporter
+    // 1. Send notification email to owner
     await transporter.sendMail(mailOptions);
-    
+    console.log('[Email] Owner notification email sent successfully.');
+
+    // 2. Send auto-reply confirmation email to client
+    await transporter.sendMail(clientReplyOptions);
+    console.log(`[Email] Auto-reply confirmation email sent to client: ${email.trim()}`);
+
+    // 3. Save submission to Google Sheet (non-blocking — runs in background)
+    saveToGoogleSheet({
+      name:    name.trim(),
+      email:   email.trim(),
+      subject: subject ? subject.trim() : 'No Subject',
+      message: message.trim()
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Your inquiry has been successfully transmitted directly to our inbox.'
@@ -364,26 +513,15 @@ app.use((err, req, res, next) => {
 // 5. Uncaught Exceptions/Rejections listener to ensure server stability
 process.on('uncaughtException', (err) => {
   console.error('FATAL: Uncaught Exception raised:', err);
-  // Log critical error; keep server running unless necessary to exit
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('FATAL: Unhandled Promise Rejection at:', promise, 'reason:', reason);
 });
 
-// 6. Bind to Port
+// 6. Bind to Port and Start
 const PORT = process.env.PORT || 5000;
 
-async function startServer() {
-  try {
-    await initDatabase();
-    app.listen(PORT, () => {
-      console.log(`[CloudWaveTech Backend] Server successfully running on port ${PORT}`);
-    });
-  } catch (error) {
-    console.error('Failed to start server due to database initialization failure:', error);
-    process.exit(1);
-  }
-}
-
-startServer();
+app.listen(PORT, () => {
+  console.log(`[CloudWaveTech Backend] Server successfully running on port ${PORT}`);
+});
