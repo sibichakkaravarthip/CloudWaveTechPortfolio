@@ -43,8 +43,10 @@ export default function Contact() {
     setStatus('loading');
     setErrorMessage('');
 
+    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/send`, {
+      const response = await fetch(`${apiUrl}/send`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -52,7 +54,9 @@ export default function Contact() {
         body: JSON.stringify(formData),
       });
 
-      const data = await response.json();
+      // Guard against empty or non-JSON responses (e.g. 404)
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : {};
 
       if (response.ok && data.success) {
         setStatus('success');

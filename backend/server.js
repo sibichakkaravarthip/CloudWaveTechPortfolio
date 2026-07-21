@@ -125,7 +125,10 @@ app.post('/send', validateContactPayload, async (req, res, next) => {
 
   // Create transporter with Gmail SMTP
   const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    requireTLS: true,
     auth: {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASS
@@ -421,7 +424,7 @@ Sent securely via CloudWaveTech Contact Form API.
           </div>
 
           <div class="cta">
-            <a href="https://cloudwavetech.com" target="_blank">Visit Our Website</a>
+            <a href="https://cloud-wave-tech-portfolio.vercel.app/" target="_blank">Visit Our Website</a>
           </div>
 
           <p class="body-text" style="font-size:14px; color:#6b7280;">
